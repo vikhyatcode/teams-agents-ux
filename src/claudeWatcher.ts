@@ -38,6 +38,7 @@ export interface TrackedAgent {
   hitlTimer?: ReturnType<typeof setTimeout>;
   staleTimer?: ReturnType<typeof setTimeout>;
   thoughtRotationTimer?: ReturnType<typeof setInterval>;
+  turnHasThinking: boolean;
   thoughtSnippets: string[];
   thoughtIndex: number;
   watcher?: fs.FSWatcher;
@@ -87,6 +88,7 @@ export class ClaudeWatcher {
       launchedAt: now,
       lastActivityTime: now,
       activeTools: new Map(),
+      turnHasThinking: false,
       thoughtSnippets: [],
       thoughtIndex: 0,
     };
@@ -361,83 +363,67 @@ export class ClaudeWatcher {
 
   private processRecord(agent: TrackedAgent, record: Record<string, unknown>): void {
     const type = record.type as string;
+    const message = record.message as Record<string, unknown> | undefined;
+    const stopReason = (message?.stop_reason as string | null) ?? null;
 
-    // Log every record type for debugging
-    LOG.appendLine(`[${agent.id}] record: type=${type} subtype=${(record as Record<string, unknown>).subtype || "N/A"}`);
+    // Log every record for debugging
+    LOG.appendLine(
+      `[${agent.id}] record: type=${type} subtype=${(record as Record<string, unknown>).subtype || "N/A"} stop_reason=${stopReason}`
+    );
 
     if (type === "assistant") {
-      const message = record.message as Record<string, unknown> | undefined;
       const content = (message?.content as Array<Record<string, unknown>>) || [];
+      // Each JSONL record has exactly one content block
+      const block = content[0] as Record<string, unknown> | undefined;
+      if (!block) return;
 
-      let hasThinkingBlock = false;
-      let hasToolUse = false;
-      let hasText = false;
+      if (block.type === "thinking") {
+        agent.turnHasThinking = true;
+        const thought = String(block.thinking || "");
+        LOG.appendLine(`[${agent.id}] thinking block: ${thought.length} chars`);
+        this.startThoughtRotation(agent, thought);
+        // stop_reason is null here (more coming), stay in thinking
+      } else if (block.type === "tool_use") {
+        const toolName = block.name as string;
+        const toolId = block.id as string;
+        const input = (block.input as Record<string, unknown>) || {};
 
-      for (const block of content) {
-        if (block.type === "tool_use") {
-          hasToolUse = true;
-          const toolName = block.name as string;
-          const toolId = block.id as string;
-          const input = (block.input as Record<string, unknown>) || {};
+        agent.activeTools.set(toolId, toolName);
+        const activity = this.toolToActivity(toolName);
+        const detail = this.getToolDetail(toolName, input);
+        LOG.appendLine(`[${agent.id}] ${toolName} -> ${activity} ${detail}`);
 
-          agent.activeTools.set(toolId, toolName);
-          const activity = this.toolToActivity(toolName);
-          const detail = this.getToolDetail(toolName, input);
-          LOG.appendLine(`[${agent.id}] ${toolName} -> ${activity} ${detail}`);
+        this.setActivity(agent, activity, toolName, detail);
 
-          this.setActivity(agent, activity, toolName, detail);
-
-          // Start HITL timer — if tool_result doesn't come back soon,
-          // it means user is being asked to approve
-          this.startHitlTimer(agent);
-        }
-        if (block.type === "thinking") {
-          // Chain-of-thought block — extract snippets and rotate through them
-          hasThinkingBlock = true;
-          const thought = String(block.thinking || "");
-          LOG.appendLine(`[${agent.id}] thinking block: ${thought.length} chars`);
-          this.startThoughtRotation(agent, thought);
-        }
-        if (block.type === "text") {
-          hasText = true;
-          const text = String(block.text || "");
-          const snippet = this.trunc(text.split("\n")[0].trim(), 40);
-          if (agent.activity === "idle" || agent.activity === "waiting") {
-            this.setActivity(agent, "thinking", undefined, snippet);
-          } else if (agent.activity === "thinking" && !hasThinkingBlock) {
-            // Only use response text as detail if there was no thinking block
-            // in this message — otherwise keep the chain-of-thought snippet
-            this.setActivity(agent, "thinking", undefined, snippet);
+        // Start HITL timer — if tool_result doesn't come back soon,
+        // it means user is being asked to approve
+        this.startHitlTimer(agent);
+      } else if (block.type === "text") {
+        if (stopReason === "end_turn") {
+          // Final response — turn is done
+          LOG.appendLine(`[${agent.id}] assistant text + end_turn -> idle`);
+          agent.activeTools.clear();
+          this.endTurn(agent);
+        } else {
+          // Intermediate text (stop_reason is null, more blocks coming)
+          // Don't overwrite thought snippets if thinking happened this turn
+          if (!agent.turnHasThinking) {
+            const text = String(block.text || "");
+            const snippet = this.trunc(text.split("\n")[0].trim(), 40);
+            if (snippet) {
+              this.setActivity(agent, "thinking", undefined, snippet);
+            }
           }
+          // If turnHasThinking is true, keep the thought rotation running
         }
-      }
-
-      // If the assistant message has text but NO tool_use, the turn is
-      // finishing — Claude is outputting its final response. Start an idle
-      // timer as a fallback in case turn_duration never arrives.
-      if (hasText && !hasToolUse) {
-        LOG.appendLine(`[${agent.id}] assistant text-only message -> scheduling idle fallback`);
-        if (agent.idleTimer) clearTimeout(agent.idleTimer);
-        agent.idleTimer = setTimeout(() => {
-          if (agent.activity === "thinking") {
-            LOG.appendLine(`[${agent.id}] idle fallback fired -> idle`);
-            agent.activeTools.clear();
-            this.setActivity(agent, "idle");
-          }
-        }, 3000);
       }
     } else if (type === "user") {
-      const message = record.message as Record<string, unknown> | undefined;
       const rawContent = message?.content;
 
       // content can be a plain string (first user message) or an array of blocks
       if (typeof rawContent === "string") {
         // User typed a text message — new turn starting
-        agent.activeTools.clear();
-        if (agent.hitlTimer) {
-          clearTimeout(agent.hitlTimer);
-          agent.hitlTimer = undefined;
-        }
+        this.resetTurn(agent);
         LOG.appendLine(`[${agent.id}] user text message -> thinking`);
         this.setActivity(agent, "thinking");
       } else if (Array.isArray(rawContent)) {
@@ -457,30 +443,26 @@ export class ClaudeWatcher {
             }
           }
           if (agent.activeTools.size === 0) {
+            LOG.appendLine(`[${agent.id}] tool_result (all tools done) -> thinking`);
             this.setActivity(agent, "thinking");
           }
         } else {
           // User sent a new message (not a tool result) — new turn starting
-          agent.activeTools.clear();
-          if (agent.hitlTimer) {
-            clearTimeout(agent.hitlTimer);
-            agent.hitlTimer = undefined;
-          }
+          this.resetTurn(agent);
           LOG.appendLine(`[${agent.id}] user array message -> thinking`);
           this.setActivity(agent, "thinking");
         }
       }
     } else if (type === "system") {
-      const subtype = record.subtype as string;
-      if (subtype === "turn_duration") {
-        // Claude's turn is over — agent goes back to idle (at desk)
+      const subtype = record.subtype as string | undefined;
+      const event = record.event as string | undefined;
+      const key = subtype || event || "";
+
+      if (key === "turn_duration") {
+        // Definitive turn end — safety net (end_turn should have fired already)
+        LOG.appendLine(`[${agent.id}] turn_duration -> idle`);
         agent.activeTools.clear();
-        if (agent.hitlTimer) {
-          clearTimeout(agent.hitlTimer);
-          agent.hitlTimer = undefined;
-        }
-        LOG.appendLine(`[${agent.id}] turn ended -> idle`);
-        this.setActivity(agent, "idle");
+        this.endTurn(agent);
 
         // Start a stale timer: if no new JSONL activity for 10s,
         // assume the session ended (Ctrl+C / process killed)
@@ -500,11 +482,42 @@ export class ClaudeWatcher {
         }, 10000);
       }
       // Detect session end (Ctrl+C, /exit, etc.)
-      if (subtype === "session_end" || subtype === "exit") {
-        LOG.appendLine(`[${agent.id}] session ended (${subtype}) -> returning to coffee room`);
+      if (key === "session_end" || key === "exit" || key === "stop") {
+        LOG.appendLine(`[${agent.id}] session ended (${key}) -> returning to coffee room`);
         this.returnAgent(agent);
       }
+    } else if (type === "progress") {
+      // Tool execution progress — ignore, doesn't change state
+      LOG.appendLine(`[${agent.id}] progress record (ignored)`);
+    } else {
+      // Any other record type — log it so we can understand the JSONL format
+      LOG.appendLine(`[${agent.id}] unhandled record type: ${type} keys: ${Object.keys(record).join(",")}`);
     }
+  }
+
+  /** Reset turn-level state for a new user turn. */
+  private resetTurn(agent: TrackedAgent): void {
+    agent.turnHasThinking = false;
+    agent.thoughtSnippets = [];
+    agent.thoughtIndex = 0;
+    agent.activeTools.clear();
+    this.stopThoughtRotation(agent);
+    if (agent.hitlTimer) {
+      clearTimeout(agent.hitlTimer);
+      agent.hitlTimer = undefined;
+    }
+  }
+
+  /** End the current turn — set idle and clean up turn state. */
+  private endTurn(agent: TrackedAgent): void {
+    agent.turnHasThinking = false;
+    agent.thoughtSnippets = [];
+    agent.thoughtIndex = 0;
+    if (agent.hitlTimer) {
+      clearTimeout(agent.hitlTimer);
+      agent.hitlTimer = undefined;
+    }
+    this.setActivity(agent, "idle");
   }
 
   private toolToActivity(toolName: string): AgentActivity {
