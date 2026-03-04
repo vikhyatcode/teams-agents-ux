@@ -1,0 +1,59 @@
+{
+  "name": "teams-pixel-agents",
+  "displayName": "Teams Pixel Agents",
+  "description": "Animated pixel characters in a virtual Teams-themed office inside VS Code. Watch your AI agents come to life!",
+  "version": "0.1.0",
+  "publisher": "your-publisher-name",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "icon": "icon.png",
+  "contributes": {
+    "commands": [
+      {
+        "command": "teamsPixelAgents.openOffice",
+        "title": "Teams Pixel Agents: Open Office"
+      },
+      {
+        "command": "teamsPixelAgents.addCharacter",
+        "title": "Teams Pixel Agents: Add Custom Character"
+      }
+    ],
+    "configuration": {
+      "title": "Teams Pixel Agents",
+      "properties": {
+        "teamsPixelAgents.maxCharacters": {
+          "type": "number",
+          "default": 5,
+          "description": "Maximum number of characters in the office"
+        },
+        "teamsPixelAgents.animationSpeed": {
+          "type": "number",
+          "default": 1,
+          "description": "Animation speed multiplier (0.5 = slow, 2 = fast)"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "npm run build:ext && npm run build:webview",
+    "build:ext": "node esbuild.js --production",
+    "build:webview": "cd webview-ui && npm run build",
+    "watch": "node esbuild.js --watch",
+    "dev:webview": "cd webview-ui && npm run dev",
+    "lint": "eslint src/",
+    "package": "npx @vscode/vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "esbuild": "^0.20.0",
+    "typescript": "^5.3.0"
+  }
+}
