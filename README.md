@@ -9,6 +9,9 @@ A living, animated office inside VS Code where your Claude Code agents work, pla
 ![Claude Code](https://img.shields.io/badge/Claude%20Code-Integrated-blueviolet)
 ![Teams](https://img.shields.io/badge/Microsoft%20Teams-Connected-6264A7)
 
+
+![Agent office ](https://github.com/user-attachments/assets/bd4970d4-fc8e-4c7a-8b70-eb231c47382a)
+
 ---
 
 ```
