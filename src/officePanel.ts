@@ -572,29 +572,6 @@ export class OfficePanel implements vscode.WebviewViewProvider {
     }
 
     function drawBreakRoomFurniture(x, y, rw, rh) {
-      // ── Rug under seating area ──
-      const rugX = x + rw / 2 - 50, rugY = y + rh * 0.45;
-      ctx.fillStyle = '#8B4D6E';
-      ctx.beginPath();
-      ctx.roundRect(rugX, rugY, 100, 60, 4);
-      ctx.fill();
-      ctx.strokeStyle = '#D4A574';
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.roundRect(rugX + 4, rugY + 4, 92, 52, 3);
-      ctx.stroke();
-      // Diamond motif
-      ctx.strokeStyle = 'rgba(212,165,116,0.3)';
-      ctx.lineWidth = 1;
-      const rc = { x: rugX + 50, y: rugY + 30 };
-      ctx.beginPath();
-      ctx.moveTo(rc.x, rc.y - 12);
-      ctx.lineTo(rc.x + 16, rc.y);
-      ctx.lineTo(rc.x, rc.y + 12);
-      ctx.lineTo(rc.x - 16, rc.y);
-      ctx.closePath();
-      ctx.stroke();
-
       // ── Window on wall ──
       const wx = x + rw - 70, wy = y + 4;
       ctx.fillStyle = '#87CEEB';
@@ -650,82 +627,6 @@ export class OfficePanel implements vscode.WebviewViewProvider {
       ctx.fill();
       // Steam
       drawCoffeeSteam(cmx + 8, cmy - 2);
-
-      // ── Couch ──
-      const cx = x + 20, cy = y + rh * 0.42;
-      // Feet
-      ctx.fillStyle = '#5C3D2E';
-      ctx.fillRect(cx + 2, cy + 32, 4, 5);
-      ctx.fillRect(cx + 90, cy + 32, 4, 5);
-      // Body
-      ctx.fillStyle = '#B85C38';
-      ctx.beginPath();
-      ctx.roundRect(cx, cy, 96, 32, 4);
-      ctx.fill();
-      // Armrests
-      ctx.fillStyle = '#A04E2E';
-      ctx.beginPath();
-      ctx.roundRect(cx - 4, cy + 2, 8, 26, 3);
-      ctx.fill();
-      ctx.beginPath();
-      ctx.roundRect(cx + 92, cy + 2, 8, 26, 3);
-      ctx.fill();
-      // Cushion dividers
-      ctx.strokeStyle = 'rgba(0,0,0,0.15)';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(cx + 32, cy + 4);
-      ctx.lineTo(cx + 32, cy + 28);
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.moveTo(cx + 64, cy + 4);
-      ctx.lineTo(cx + 64, cy + 28);
-      ctx.stroke();
-      // Fabric lines
-      ctx.strokeStyle = 'rgba(255,255,255,0.06)';
-      for (let fl = cy + 8; fl < cy + 26; fl += 4) {
-        ctx.beginPath();
-        ctx.moveTo(cx + 6, fl);
-        ctx.lineTo(cx + 90, fl);
-        ctx.stroke();
-      }
-      // Cushion highlight
-      ctx.fillStyle = '#D4734E';
-      ctx.fillRect(cx + 6, cy + 3, 24, 3);
-      ctx.fillRect(cx + 36, cy + 3, 24, 3);
-      ctx.fillRect(cx + 68, cy + 3, 22, 3);
-
-      // ── Coffee table ──
-      const tx = x + 40, ty = y + rh * 0.65;
-      // Legs
-      ctx.fillStyle = '#5C3D2E';
-      ctx.fillRect(tx + 2, ty + 14, 3, 10);
-      ctx.fillRect(tx + 55, ty + 14, 3, 10);
-      // Surface
-      ctx.fillStyle = '#6B5344';
-      ctx.beginPath();
-      ctx.roundRect(tx, ty, 60, 16, 2);
-      ctx.fill();
-      // Wood grain
-      ctx.strokeStyle = 'rgba(255,255,255,0.05)';
-      ctx.lineWidth = 1;
-      for (let g = tx + 5; g < tx + 56; g += 8) {
-        ctx.beginPath();
-        ctx.moveTo(g, ty + 2);
-        ctx.lineTo(g + 3, ty + 13);
-        ctx.stroke();
-      }
-      // Coffee mug on table
-      ctx.fillStyle = '#FFF';
-      ctx.beginPath();
-      ctx.roundRect(tx + 24, ty + 3, 8, 8, 1);
-      ctx.fill();
-      ctx.strokeStyle = '#DDD';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.arc(tx + 35, ty + 7, 3, -1, 1);
-      ctx.stroke();
-      drawCoffeeSteam(tx + 26, ty + 1);
 
       // ── Plants ──
       drawPlant(x + 14, y + rh - 18, 1.3, '#8B4513', '#4CAF50');
