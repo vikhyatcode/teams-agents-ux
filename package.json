@@ -23,6 +23,14 @@
       {
         "command": "teamsPixelAgents.addCharacter",
         "title": "Teams Pixel Agents: Add Custom Character"
+      },
+      {
+        "command": "teamsPixelAgents.connectTeams",
+        "title": "Teams Agents: Connect to Teams"
+      },
+      {
+        "command": "teamsPixelAgents.disconnectTeams",
+        "title": "Teams Agents: Disconnect Teams"
       }
     ],
     "views": {
@@ -30,7 +38,7 @@
         {
           "type": "webview",
           "id": "teamsPixelAgents.officeView",
-          "name": "Pixel Office"
+          "name": "Agent Office"
         }
       ]
     },
@@ -46,6 +54,17 @@
           "type": "number",
           "default": 1,
           "description": "Animation speed multiplier (0.5 = slow, 2 = fast)"
+        },
+        "teamsPixelAgents.teamsPollingInterval": {
+          "type": "number",
+          "default": 60,
+          "minimum": 30,
+          "description": "Seconds between Teams message polls"
+        },
+        "teamsPixelAgents.anthropicApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Claude API key for message summarization"
         }
       }
     }
@@ -59,6 +78,9 @@
     "dev:webview": "cd webview-ui && npm run dev",
     "lint": "eslint src/",
     "package": "npx @vscode/vsce package --no-dependencies"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

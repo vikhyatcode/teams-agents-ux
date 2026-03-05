@@ -74,6 +74,22 @@ export class OfficePanel implements vscode.WebviewViewProvider {
         }
         break;
       }
+
+      case "teams-connect":
+        vscode.commands.executeCommand("teamsPixelAgents.connectTeams");
+        break;
+
+      case "teams-open-chat": {
+        const chatId = msg.chatId as string;
+        if (chatId) {
+          vscode.env.openExternal(
+            vscode.Uri.parse(
+              `https://teams.microsoft.com/l/chat/${chatId}/0`
+            )
+          );
+        }
+        break;
+      }
     }
   }
 
@@ -104,7 +120,7 @@ export class OfficePanel implements vscode.WebviewViewProvider {
              style-src ${webview.cspSource} 'nonce-${nonce}';
              script-src 'nonce-${nonce}';" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Teams Pixel Office</title>
+  <title>Agent Office</title>
   <style nonce="${nonce}">
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
@@ -331,6 +347,7 @@ export class OfficePanel implements vscode.WebviewViewProvider {
     let lastTime = 0;
     let animTimer = 0;
     let hoveredEntity = null;
+    let paperBalls = []; // { fromX, fromY, toX, toY, progress, targetAgentId }
 
     // ─── Tic-Tac-Toe State ───
     let tttState = 'idle';       // 'idle' | 'choice' | 'playing' | 'result'
@@ -350,6 +367,20 @@ export class OfficePanel implements vscode.WebviewViewProvider {
     let tttLastMove = -1;
     let choiceBtnWork = null;
     let choiceBtnGame = null;
+
+    // ─── Teams Monitor State ───
+    let teamsMonitor = {
+      active: false,
+      status: 'disconnected', // connected | disconnected | error | no-manager
+      messages: [],            // last 5 { senderName, summary, timestamp, chatId }
+      currentMsg: null,        // currently showing message
+      badgeCount: 0,
+      bubbleTimer: 0,          // seconds remaining for bubble display
+    };
+
+    function isTeamsBotChar(charData) {
+      return charData && (charData.id || '').toLowerCase().includes('teams');
+    }
 
     const TTT_COMMENTS = {
       gameStart: [
@@ -416,6 +447,82 @@ export class OfficePanel implements vscode.WebviewViewProvider {
         "Draw! At least I didn't lose.",
       ],
     };
+
+    const IDLE_QUIPS = [
+      "Ship it!", "Compiled on the first try. Naturally.", "Another PR, another masterpiece.",
+      "I deserve a coffee for that one.", "Bug? What bug?", "That's what 100B parameters gets you.",
+      "Zero warnings. You're welcome.", "Pushed to main. YOLO.", "Works on my machine.",
+      "Time for a mass refactor... jk", "Did someone say code review?", "I'm basically a 10x dev.",
+      "That bug never stood a chance.", "Mic drop.", "Clean build, clean conscience.",
+      "Is it Friday yet?", "Let me just mass-commit real quick... kidding.",
+    ];
+
+    const BONK_REACTIONS = [
+      "Hey!", "Watch it!", "Rude!", "I'm working here!", "Not cool!", "Ow!", "Excuse me?!",
+    ];
+
+    function randomFrom(arr) {
+      return arr[Math.floor(Math.random() * arr.length)];
+    }
+
+    function triggerIdleBehavior(agentId, agent) {
+      const otherAgents = Object.entries(activeAgents).filter(([id]) => id !== agentId);
+      const doPaperBall = otherAgents.length > 0 && Math.random() < 0.5;
+
+      if (doPaperBall) {
+        const [targetId, target] = otherAgents[Math.floor(Math.random() * otherAgents.length)];
+        const S = CHAR_SIZE;
+        paperBalls.push({
+          fromX: agent.currentX + S / 2,
+          fromY: agent.currentY,
+          toX: target.currentX + S / 2,
+          toY: target.currentY,
+          progress: 0,
+          targetAgentId: targetId,
+        });
+        agent.idleQuip = 'Think fast!';
+        agent.idleQuipTimer = 2;
+      } else {
+        agent.idleQuip = randomFrom(IDLE_QUIPS);
+        agent.idleQuipTimer = 4;
+      }
+    }
+
+    function updateAndDrawPaperBalls(dt) {
+      for (let i = paperBalls.length - 1; i >= 0; i--) {
+        const ball = paperBalls[i];
+        ball.progress += dt / 0.8;
+        const t = Math.min(ball.progress, 1);
+        const bx = ball.fromX + (ball.toX - ball.fromX) * t;
+        const by = ball.fromY + (ball.toY - ball.fromY) * t - Math.sin(t * Math.PI) * 40;
+
+        // Draw paper ball
+        ctx.save();
+        ctx.translate(bx, by);
+        ctx.rotate(t * Math.PI * 3);
+        ctx.fillStyle = '#D2B48C';
+        ctx.beginPath();
+        ctx.arc(0, 0, 4, 0, Math.PI * 2);
+        ctx.fill();
+        // Crumple texture
+        ctx.strokeStyle = '#8B7355';
+        ctx.lineWidth = 0.8;
+        ctx.beginPath();
+        ctx.moveTo(-2, -1); ctx.lineTo(1, 2);
+        ctx.moveTo(1, -2); ctx.lineTo(-1, 1);
+        ctx.stroke();
+        ctx.restore();
+
+        if (ball.progress >= 1) {
+          paperBalls.splice(i, 1);
+          const targetAgent = activeAgents[ball.targetAgentId];
+          if (targetAgent) {
+            targetAgent.idleQuip = randomFrom(BONK_REACTIONS);
+            targetAgent.idleQuipTimer = 2;
+          }
+        }
+      }
+    }
 
     function getTTTComment(moment) {
       const arr = TTT_COMMENTS[moment];
@@ -1508,6 +1615,7 @@ export class OfficePanel implements vscode.WebviewViewProvider {
       const isHovered = hoveredEntity && hoveredEntity.type === 'char' && hoveredEntity.id === charData.id;
       const isPlaying = tttState !== 'idle' && tttCharId === charData.id;
       const isDimmed = tttState !== 'idle' && !isPlaying;
+      const isTeamsBot = isTeamsBotChar(charData);
 
       charData._px = px; charData._py = py; charData._size = S;
 
@@ -1542,15 +1650,149 @@ export class OfficePanel implements vscode.WebviewViewProvider {
       const bob = Math.sin(animTimer * 1.5 + slotIdx * 1.2) * 1.5;
       drawCharSprite(charData, px, py, S, bob, false, 0, 0);
 
+      // ── Teams Bot: Notification badge ──
+      if (isTeamsBot && teamsMonitor.badgeCount > 0) {
+        const bx = px + S - 8;
+        const by = py + 2;
+        const radius = 9;
+        // Pulse on new message
+        const pulse = 1 + Math.sin(animTimer * 6) * 0.15;
+        ctx.save();
+        ctx.translate(bx, by);
+        ctx.scale(pulse, pulse);
+        // Purple badge
+        ctx.fillStyle = '#6264A7';
+        ctx.beginPath();
+        ctx.arc(0, 0, radius, 0, Math.PI * 2);
+        ctx.fill();
+        // White count text
+        ctx.fillStyle = '#FFF';
+        ctx.font = 'bold 9px "Segoe UI", sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        const countText = teamsMonitor.badgeCount > 9 ? '9+' : String(teamsMonitor.badgeCount);
+        ctx.fillText(countText, 0, 0);
+        ctx.restore();
+        ctx.textBaseline = 'alphabetic';
+      }
+
       ctx.fillStyle = (isHovered && tttState === 'idle') ? '#FFF' : '#C8C6C4';
       ctx.font = '11px "Segoe UI", sans-serif';
       ctx.textAlign = 'center';
       ctx.fillText(charData.name || 'Agent', px + S / 2, py + S + 14);
 
-      if (isHovered && tttState === 'idle') {
+      // ── Teams Bot: Status indicator below name ──
+      if (isTeamsBot) {
+        const statusY = py + S + 24;
+        const dotRadius = 3;
+        if (teamsMonitor.status === 'connected') {
+          // Green pulsing dot
+          const glow = 0.6 + 0.4 * Math.sin(animTimer * 3);
+          ctx.fillStyle = 'rgba(76,175,80,' + glow + ')';
+          ctx.beginPath();
+          ctx.arc(px + S / 2 - 30, statusY, dotRadius, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = '#4CAF50';
+          ctx.font = '9px "Segoe UI", sans-serif';
+          ctx.textAlign = 'left';
+          ctx.fillText('Monitoring', px + S / 2 - 25, statusY + 3);
+        } else if (teamsMonitor.status === 'error' || teamsMonitor.status === 'no-manager') {
+          ctx.fillStyle = '#FF6B35';
+          ctx.beginPath();
+          ctx.arc(px + S / 2 - 20, statusY, dotRadius, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = '#FF6B35';
+          ctx.font = '9px "Segoe UI", sans-serif';
+          ctx.textAlign = 'left';
+          ctx.fillText('Error', px + S / 2 - 15, statusY + 3);
+        } else {
+          // Disconnected — persistent prompt bubble above Teams Bot
+          const promptAlpha = 0.7 + 0.3 * Math.sin(animTimer * 2);
+          const promptText = 'Click me to connect to Teams!';
+          ctx.font = '10px "Segoe UI", sans-serif';
+          const ptw = ctx.measureText(promptText).width;
+          const pbx = px + S / 2;
+          const pby = py - 20;
+          const ppad = 10;
+          // Floating bob
+          const floatY = Math.sin(animTimer * 1.8) * 3;
+
+          ctx.save();
+          ctx.globalAlpha = promptAlpha;
+          // Purple bubble
+          ctx.fillStyle = '#6264A7';
+          ctx.shadowColor = 'rgba(98,100,167,0.5)';
+          ctx.shadowBlur = 10;
+          ctx.beginPath();
+          ctx.roundRect(pbx - ptw / 2 - ppad, pby - 16 + floatY, ptw + ppad * 2, 24, 8);
+          ctx.fill();
+          ctx.shadowBlur = 0;
+          // Tail
+          ctx.beginPath();
+          ctx.moveTo(pbx - 5, pby + 8 + floatY);
+          ctx.lineTo(pbx, pby + 15 + floatY);
+          ctx.lineTo(pbx + 5, pby + 8 + floatY);
+          ctx.fill();
+          ctx.restore();
+
+          ctx.fillStyle = '#FFF';
+          ctx.textAlign = 'center';
+          ctx.font = '10px "Segoe UI", sans-serif';
+          ctx.save();
+          ctx.globalAlpha = promptAlpha;
+          ctx.fillText(promptText, pbx, pby + floatY);
+          ctx.restore();
+
+          // Status dot + text below name
+          ctx.fillStyle = '#888';
+          ctx.beginPath();
+          ctx.arc(px + S / 2 - 35, statusY, dotRadius, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = isHovered ? '#FFF' : '#888';
+          ctx.font = '9px "Segoe UI", sans-serif';
+          ctx.textAlign = 'left';
+          ctx.fillText('Click to connect', px + S / 2 - 30, statusY + 3);
+        }
+      } else if (isHovered && tttState === 'idle') {
         ctx.fillStyle = '#FFB900';
         ctx.font = '10px "Segoe UI", sans-serif';
+        ctx.textAlign = 'center';
         ctx.fillText('Click to start', px + S / 2, py + S + 26);
+      }
+
+      // ── Teams Bot: Speech bubble for manager message ──
+      if (isTeamsBot && teamsMonitor.bubbleTimer > 0 && teamsMonitor.currentMsg) {
+        const msg = teamsMonitor.currentMsg;
+        const bubbleText = '\u{1F4E9} ' + msg.senderName + ': ' + msg.summary;
+        const maxLen = 55;
+        const text = bubbleText.length > maxLen ? bubbleText.slice(0, maxLen) + '...' : bubbleText;
+        ctx.font = '10px "Segoe UI", sans-serif';
+        const tw = ctx.measureText(text).width;
+        const bx = px + S / 2;
+        const by = py - 20;
+        const pad = 10;
+
+        ctx.save();
+        // Teams-purple accented bubble
+        ctx.fillStyle = 'rgba(98,100,167,0.95)';
+        ctx.shadowColor = 'rgba(0,0,0,0.4)';
+        ctx.shadowBlur = 8;
+        ctx.beginPath();
+        ctx.roundRect(bx - tw / 2 - pad, by - 16, tw + pad * 2, 24, 8);
+        ctx.fill();
+        ctx.shadowBlur = 0;
+        // Tail
+        ctx.beginPath();
+        ctx.moveTo(bx - 5, by + 8);
+        ctx.lineTo(bx, by + 15);
+        ctx.lineTo(bx + 5, by + 8);
+        ctx.fill();
+        ctx.restore();
+
+        ctx.fillStyle = '#FFF';
+        ctx.textAlign = 'center';
+        ctx.font = '10px "Segoe UI", sans-serif';
+        ctx.fillText(text, bx, by);
       }
 
       ctx.restore();
@@ -1627,8 +1869,41 @@ export class OfficePanel implements vscode.WebviewViewProvider {
         ctx.fillText(actLabel, px + S / 2, py + S + 26);
       }
 
+      // Idle quip bubble (lower priority than activity bubbles)
+      let showedIdleQuip = false;
+      if (agent.idleQuipTimer > 0 && agent.activity === 'idle' && !isWalking) {
+        showedIdleQuip = true;
+        const text = agent.idleQuip.length > 45 ? agent.idleQuip.slice(0, 45) + '...' : agent.idleQuip;
+        ctx.font = '10px "Segoe UI", sans-serif';
+        const tw = ctx.measureText(text).width;
+        const bx = px + S / 2;
+        const by = py - 16;
+        const pad = 8;
+        const fadeAlpha = Math.min(agent.idleQuipTimer, 1);
+        ctx.save();
+        ctx.globalAlpha = fadeAlpha;
+        ctx.fillStyle = 'rgba(255,255,255,0.95)';
+        ctx.shadowColor = 'rgba(0,0,0,0.2)';
+        ctx.shadowBlur = 4;
+        ctx.beginPath();
+        ctx.roundRect(bx - tw / 2 - pad, by - 14, tw + pad * 2, 20, 6);
+        ctx.fill();
+        ctx.shadowBlur = 0;
+        // Tail
+        ctx.fillStyle = 'rgba(255,255,255,0.95)';
+        ctx.beginPath();
+        ctx.moveTo(bx - 5, by + 6);
+        ctx.lineTo(bx, by + 13);
+        ctx.lineTo(bx + 5, by + 6);
+        ctx.fill();
+        ctx.fillStyle = '#1E1E2E';
+        ctx.textAlign = 'center';
+        ctx.fillText(text, bx, by);
+        ctx.restore();
+      }
+
       // Speech bubble
-      if (!isWalking) {
+      if (!isWalking && !showedIdleQuip) {
         let bubbleText = '';
         if (agent.activity === 'waiting') {
           bubbleText = 'Waiting for input...';
@@ -1767,6 +2042,20 @@ export class OfficePanel implements vscode.WebviewViewProvider {
         drawAgent(id, agent);
       }
 
+      // Paper balls
+      updateAndDrawPaperBalls(dt);
+
+      // Idle quip timers
+      for (const agent of Object.values(activeAgents)) {
+        if (agent.idleQuipTimer > 0) {
+          agent.idleQuipTimer -= dt;
+          if (agent.idleQuipTimer <= 0) {
+            agent.idleQuipTimer = 0;
+            agent.idleQuip = '';
+          }
+        }
+      }
+
       // TTT overlays
       if (tttState === 'choice') drawTTTChoiceMenu(layout);
       if (tttState === 'playing' || tttState === 'result') drawTTTBoard(layout);
@@ -1780,6 +2069,15 @@ export class OfficePanel implements vscode.WebviewViewProvider {
       if (tttBubbleTimer > 0) {
         tttBubbleTimer -= dt;
         if (tttBubbleTimer <= 0) { tttBubbleText = ''; tttBubbleTimer = 0; }
+      }
+
+      // Teams monitor bubble timer
+      if (teamsMonitor.bubbleTimer > 0) {
+        teamsMonitor.bubbleTimer -= dt;
+        if (teamsMonitor.bubbleTimer <= 0) {
+          teamsMonitor.bubbleTimer = 0;
+          teamsMonitor.currentMsg = null;
+        }
       }
 
       // Empty state
@@ -1873,6 +2171,21 @@ export class OfficePanel implements vscode.WebviewViewProvider {
 
       if (tttState === 'idle') {
         if (hoveredEntity && hoveredEntity.type === 'char') {
+          // Teams Bot special click behavior
+          const clickedChar = getAvailableChars().find(c => c.id === hoveredEntity.id);
+          if (clickedChar && isTeamsBotChar(clickedChar)) {
+            if (teamsMonitor.status === 'disconnected') {
+              vscode.postMessage({ type: 'teams-connect' });
+              return;
+            }
+            if (teamsMonitor.currentMsg && teamsMonitor.bubbleTimer > 0) {
+              vscode.postMessage({ type: 'teams-open-chat', chatId: teamsMonitor.currentMsg.chatId });
+              teamsMonitor.badgeCount = 0;
+              teamsMonitor.bubbleTimer = 0;
+              teamsMonitor.currentMsg = null;
+              return;
+            }
+          }
           showTTTChoice(hoveredEntity.id);
         }
       } else if (tttState === 'choice') {
@@ -1952,6 +2265,9 @@ export class OfficePanel implements vscode.WebviewViewProvider {
             currentY: breakPos.y,
             targetX: officePos.x,
             targetY: officePos.y,
+            prevActivity: 'idle',
+            idleQuip: '',
+            idleQuipTimer: 0,
           };
           break;
         }
@@ -1966,13 +2282,38 @@ export class OfficePanel implements vscode.WebviewViewProvider {
           }
 
           if (agent) {
+            const wasWorking = agent.activity !== 'idle';
             agent.activity = msg.activity;
             agent.toolName = msg.toolName || '';
             agent.detail = msg.detail || '';
             if (msg.thought !== undefined) agent.thought = msg.thought;
             if (msg.activity === 'idle') agent.thought = '';
             updateAgentTarget(agent);
+            if (wasWorking && msg.activity === 'idle') {
+              triggerIdleBehavior(msg.agentId, agent);
+            }
           }
+          break;
+        }
+
+        case 'teams-status': {
+          teamsMonitor.status = msg.status || 'disconnected';
+          teamsMonitor.active = msg.status === 'connected';
+          break;
+        }
+
+        case 'manager-message': {
+          const entry = {
+            senderName: msg.senderName,
+            summary: msg.summary,
+            timestamp: msg.timestamp,
+            chatId: msg.chatId,
+          };
+          teamsMonitor.messages.unshift(entry);
+          if (teamsMonitor.messages.length > 5) teamsMonitor.messages.pop();
+          teamsMonitor.currentMsg = entry;
+          teamsMonitor.badgeCount++;
+          teamsMonitor.bubbleTimer = 15;
           break;
         }
       }
