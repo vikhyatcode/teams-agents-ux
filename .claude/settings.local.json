@@ -6,7 +6,8 @@
       "Bash(npm run:*)",
       "Bash(python3:*)",
       "Bash(node:*)",
-      "Bash(npx tsc:*)"
+      "Bash(npx tsc:*)",
+      "WebFetch(domain:github.com)"
     ]
   }
 }

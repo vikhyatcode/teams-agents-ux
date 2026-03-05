@@ -3,7 +3,6 @@ import { OfficePanel } from "./officePanel";
 import { CharacterManager } from "./characterManager";
 import { ClaudeWatcher } from "./claudeWatcher";
 
-let officePanel: OfficePanel | undefined;
 let characterManager: CharacterManager;
 let claudeWatcher: ClaudeWatcher;
 
@@ -12,22 +11,27 @@ export function activate(context: vscode.ExtensionContext) {
   claudeWatcher = new ClaudeWatcher(context);
   claudeWatcher.start();
 
+  const officePanel = new OfficePanel(context, characterManager, claudeWatcher);
+
+  // Register as bottom panel webview provider
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(
+      OfficePanel.viewType,
+      officePanel,
+      { webviewOptions: { retainContextWhenHidden: true } }
+    )
+  );
+
   // Forward activity events to webview
   claudeWatcher.onAgentActivity((event) => {
-    officePanel?.postMessage({ type: "agent-activity", ...event });
+    officePanel.postMessage({ type: "agent-activity", ...event });
   });
 
-  // Open the office
+  // Open/focus the office panel
   context.subscriptions.push(
     vscode.commands.registerCommand("teamsPixelAgents.openOffice", () => {
-      if (officePanel) {
-        officePanel.reveal();
-      } else {
-        officePanel = new OfficePanel(context, characterManager, claudeWatcher);
-        officePanel.onDidDispose(() => {
-          officePanel = undefined;
-        });
-      }
+      // Use the built-in command to focus the webview view by its ID
+      vscode.commands.executeCommand("teamsPixelAgents.officeView.focus");
     })
   );
 
@@ -49,12 +53,11 @@ export function activate(context: vscode.ExtensionContext) {
 
       await characterManager.addCustomCharacter(name, fileUri[0]);
       vscode.window.showInformationMessage(`Character "${name}" added!`);
-      officePanel?.refreshCharacters();
+      officePanel.refreshCharacters();
     })
   );
 }
 
 export function deactivate() {
   claudeWatcher?.stop();
-  officePanel?.dispose();
 }

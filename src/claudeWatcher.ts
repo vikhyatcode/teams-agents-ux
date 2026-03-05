@@ -10,6 +10,7 @@ export type AgentActivity =
   | "reading"
   | "running-command"
   | "searching"
+  | "researching"
   | "waiting";
 
 export interface AgentEvent {
@@ -43,6 +44,7 @@ export interface TrackedAgent {
   thoughtIndex: number;
   watcher?: fs.FSWatcher;
   pollInterval?: ReturnType<typeof setInterval>;
+  watchdogInterval?: ReturnType<typeof setInterval>;
   activeTools: Map<string, string>;
 }
 
@@ -194,6 +196,27 @@ export class ClaudeWatcher {
     }
 
     agent.pollInterval = setInterval(() => this.readNewLines(agent), 500);
+
+    // Watchdog: detect Ctrl+C / killed sessions where no end record is written.
+    // If agent is non-idle and JSONL hasn't grown for 8s, assume session ended.
+    agent.watchdogInterval = setInterval(() => {
+      if (agent.activity === "idle") return;
+      const elapsed = Date.now() - agent.lastActivityTime;
+      if (elapsed < 30000) return;
+
+      try {
+        const stat = fs.statSync(agent.jsonlPath);
+        if (stat.size <= agent.fileOffset) {
+          LOG.appendLine(`[${agent.id}] watchdog: no JSONL activity for ${Math.round(elapsed / 1000)}s while ${agent.activity} -> idle`);
+          this.setActivity(agent, "idle");
+        }
+      } catch {
+        // File gone — session definitely ended
+        LOG.appendLine(`[${agent.id}] watchdog: JSONL file gone -> returning`);
+        this.returnAgent(agent);
+      }
+    }, 2000);
+
     LOG.appendLine(`Watching ${agent.jsonlPath} from offset 0`);
   }
 
@@ -203,6 +226,10 @@ export class ClaudeWatcher {
     if (agent.pollInterval) {
       clearInterval(agent.pollInterval);
       agent.pollInterval = undefined;
+    }
+    if (agent.watchdogInterval) {
+      clearInterval(agent.watchdogInterval);
+      agent.watchdogInterval = undefined;
     }
     if (agent.idleTimer) {
       clearTimeout(agent.idleTimer);
@@ -464,7 +491,7 @@ export class ClaudeWatcher {
         agent.activeTools.clear();
         this.endTurn(agent);
 
-        // Start a stale timer: if no new JSONL activity for 10s,
+        // Start a stale timer: if no new JSONL activity for 120s,
         // assume the session ended (Ctrl+C / process killed)
         if (agent.staleTimer) clearTimeout(agent.staleTimer);
         agent.staleTimer = setTimeout(() => {
@@ -479,7 +506,7 @@ export class ClaudeWatcher {
             // File gone — definitely ended
             this.returnAgent(agent);
           }
-        }, 10000);
+        }, 120000);
       }
       // Detect session end (Ctrl+C, /exit, etc.)
       if (key === "session_end" || key === "exit" || key === "stop") {
@@ -532,11 +559,12 @@ export class ClaudeWatcher {
         return "running-command";
       case "Glob":
       case "Grep":
+        return "searching";
       case "WebSearch":
       case "WebFetch":
-        return "searching";
+        return "researching";
       default:
-        return "thinking";
+        return toolName.startsWith("mcp") ? "researching" : "thinking";
     }
   }
 
@@ -552,6 +580,10 @@ export class ClaudeWatcher {
       case "Grep":
       case "Glob":
         return this.trunc(String(input.pattern || ""), 30);
+      case "WebSearch":
+        return this.trunc(String(input.query || ""), 30);
+      case "WebFetch":
+        return this.trunc(String(input.url || ""), 30);
       default:
         return "";
     }
