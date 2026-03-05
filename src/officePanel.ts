@@ -332,6 +332,97 @@ export class OfficePanel implements vscode.WebviewViewProvider {
     let animTimer = 0;
     let hoveredEntity = null;
 
+    // ─── Tic-Tac-Toe State ───
+    let tttState = 'idle';       // 'idle' | 'choice' | 'playing' | 'result'
+    let tttCharId = null;
+    let tttCharData = null;
+    let tttCharSlotIdx = -1;
+    let tttBoard = [0,0,0,0,0,0,0,0,0]; // 0=empty, 1=player(X), 2=AI(O)
+    let tttPlayerTurn = true;
+    let tttWinner = 0;           // 0=none, 1=player, 2=AI, 3=draw
+    let tttWinLine = null;       // [a,b,c] winning triple
+    let tttAiThinking = false;
+    let tttAnimProgress = 0;     // 0..1 enter/exit
+    let tttAnimDir = 0;          // 1=appearing, -1=disappearing
+    let tttBubbleText = '';
+    let tttBubbleTimer = 0;
+    let tttMoveCount = 0;
+    let tttLastMove = -1;
+    let choiceBtnWork = null;
+    let choiceBtnGame = null;
+
+    const TTT_COMMENTS = {
+      gameStart: [
+        "Oh, you want to play? Cute.",
+        "Prepare to lose, human!",
+        "I was trained on millions of games. Just saying.",
+        "Let's go! I'll try not to embarrass you.",
+        "A worthy challenger? We'll see about that.",
+      ],
+      aiThinking: [
+        "Computing optimal strategy... jk",
+        "Hmm, let me think...",
+        "Processing... beep boop...",
+        "Consulting my neural networks...",
+        "One moment, genius at work.",
+      ],
+      aiGoodMove: [
+        "That's what 100B parameters gets you.",
+        "Pretty good, right?",
+        "I'd say I'm sorry, but I'm not.",
+        "Strategic brilliance, if I do say so myself.",
+        "You didn't see that coming, did you?",
+      ],
+      aiBlocks: [
+        "Nice try, but I saw that coming!",
+        "Blocked! Did you think I'd miss that?",
+        "Nope! Not on my watch.",
+        "I read your mind. Well, your board.",
+        "Ha! Denied!",
+      ],
+      playerGoodMove: [
+        "OK, I'm slightly impressed.",
+        "Not bad for a human.",
+        "Lucky move... right?",
+        "Hmm, you might actually be good at this.",
+        "Alright, I see you!",
+      ],
+      playerBlocks: [
+        "Hey! That was my winning move!",
+        "Rude! I was going to win there!",
+        "OK fine, you blocked me. This time.",
+        "How dare you!",
+        "Well played... I guess.",
+      ],
+      aiWins: [
+        "GG! Better luck next compile!",
+        "I win! Surprised? I'm not.",
+        "All according to plan.",
+        "Maybe try checkers instead?",
+        "Victory is mine! *robot dance*",
+      ],
+      playerWins: [
+        "I blame my training data.",
+        "Wait, that's illegal... oh wait, it's not.",
+        "You got lucky! Best of 3?",
+        "My GPU must be overheating.",
+        "OK you win. Don't tell anyone.",
+      ],
+      draw: [
+        "Neither wins. The universe is in harmony.",
+        "A tie! How perfectly balanced.",
+        "Stalemate. We're equally matched... I guess.",
+        "Nobody wins, nobody loses. How zen.",
+        "Draw! At least I didn't lose.",
+      ],
+    };
+
+    function getTTTComment(moment) {
+      const arr = TTT_COMMENTS[moment];
+      if (!arr || arr.length === 0) return '';
+      return arr[Math.floor(Math.random() * arr.length)];
+    }
+
     // ─── MetroCity layered sprite loading ───
     let mcReady = false;
     let mcBodyImg = null;
@@ -1020,6 +1111,394 @@ export class OfficePanel implements vscode.WebviewViewProvider {
       }
     }
 
+    // ─── Tic-Tac-Toe Functions ───
+    const TTT_WIN_LINES = [
+      [0,1,2],[3,4,5],[6,7,8], // rows
+      [0,3,6],[1,4,7],[2,5,8], // cols
+      [0,4,8],[2,4,6],         // diags
+    ];
+
+    function hitTest(mx, my, rect) {
+      return rect && mx >= rect.x && mx <= rect.x + rect.w && my >= rect.y && my <= rect.y + rect.h;
+    }
+
+    function getTTTBoardRect(layout) {
+      const room = layout.rooms[0]; // Break Room
+      const rw = layout.rw;
+      const rh = layout.rh;
+      const size = Math.min(rw * 0.45, rh * 0.40, 120);
+      const bx = room.x + rw * 0.5 - size / 2;
+      const by = room.y + rh * 0.48 - size / 2;
+      return { x: bx, y: by, w: size, h: size };
+    }
+
+    function checkTTTWinner() {
+      for (const line of TTT_WIN_LINES) {
+        const [a, b, c] = line;
+        if (tttBoard[a] && tttBoard[a] === tttBoard[b] && tttBoard[a] === tttBoard[c]) {
+          tttWinLine = line;
+          return tttBoard[a]; // 1=player, 2=AI
+        }
+      }
+      if (tttBoard.every(v => v !== 0)) return 3; // draw
+      return 0;
+    }
+
+    function findWinningMove(player) {
+      for (let i = 0; i < 9; i++) {
+        if (tttBoard[i] !== 0) continue;
+        tttBoard[i] = player;
+        const win = checkTTTWinner();
+        tttBoard[i] = 0;
+        if (win === player) return i;
+      }
+      return -1;
+    }
+
+    function tttAiMove() {
+      // 1. Win if possible
+      let move = findWinningMove(2);
+      if (move !== -1) return move;
+      // 2. Block player win
+      move = findWinningMove(1);
+      if (move !== -1) return move;
+      // 3. 70% optimal, 30% random
+      if (Math.random() < 0.7) {
+        // Center
+        if (tttBoard[4] === 0) return 4;
+        // Corners
+        const corners = [0, 2, 6, 8].filter(i => tttBoard[i] === 0);
+        if (corners.length > 0) return corners[Math.floor(Math.random() * corners.length)];
+        // Edges
+        const edges = [1, 3, 5, 7].filter(i => tttBoard[i] === 0);
+        if (edges.length > 0) return edges[Math.floor(Math.random() * edges.length)];
+      }
+      // Random empty cell
+      const empty = tttBoard.map((v, i) => v === 0 ? i : -1).filter(i => i !== -1);
+      return empty.length > 0 ? empty[Math.floor(Math.random() * empty.length)] : -1;
+    }
+
+    function showTTTChoice(charId) {
+      const available = getAvailableChars();
+      const idx = available.findIndex(c => c.id === charId);
+      if (idx === -1) return;
+      tttState = 'choice';
+      tttCharId = charId;
+      tttCharData = available[idx];
+      tttCharSlotIdx = idx;
+      tttAnimProgress = 0;
+      tttAnimDir = 1;
+    }
+
+    function startTTTGame() {
+      tttState = 'playing';
+      tttBoard = [0,0,0,0,0,0,0,0,0];
+      tttPlayerTurn = true;
+      tttWinner = 0;
+      tttWinLine = null;
+      tttAiThinking = false;
+      tttMoveCount = 0;
+      tttLastMove = -1;
+      tttAnimProgress = 0;
+      tttAnimDir = 1;
+      tttBubbleText = getTTTComment('gameStart');
+      tttBubbleTimer = 2.5;
+    }
+
+    function makePlayerMove(idx) {
+      if (tttBoard[idx] !== 0 || !tttPlayerTurn || tttAiThinking || tttWinner) return;
+      // Check if player blocked AI
+      const aiWouldWin = findWinningMove(2);
+      tttBoard[idx] = 1;
+      tttLastMove = idx;
+      tttMoveCount++;
+      tttPlayerTurn = false;
+      const w = checkTTTWinner();
+      if (w) {
+        tttWinner = w;
+        tttState = 'result';
+        tttBubbleText = getTTTComment(w === 1 ? 'playerWins' : 'draw');
+        tttBubbleTimer = 3;
+        setTimeout(() => { if (tttState === 'result') resetTTT(); }, 3000);
+        return;
+      }
+      if (aiWouldWin === idx) {
+        tttBubbleText = getTTTComment('playerBlocks');
+        tttBubbleTimer = 2;
+      } else if (tttMoveCount >= 3) {
+        tttBubbleText = getTTTComment('playerGoodMove');
+        tttBubbleTimer = 2;
+      }
+      // AI moves after delay
+      tttAiThinking = true;
+      const delay = 600 + Math.random() * 600;
+      setTimeout(() => makeAiMove(), delay);
+    }
+
+    function makeAiMove() {
+      if (tttWinner || tttState !== 'playing') { tttAiThinking = false; return; }
+      // Check if AI is blocking player
+      const playerWouldWin = findWinningMove(1);
+      const move = tttAiMove();
+      if (move === -1) { tttAiThinking = false; return; }
+      tttBoard[move] = 2;
+      tttLastMove = move;
+      tttMoveCount++;
+      tttAiThinking = false;
+      tttPlayerTurn = true;
+      const w = checkTTTWinner();
+      if (w) {
+        tttWinner = w;
+        tttState = 'result';
+        tttBubbleText = getTTTComment(w === 2 ? 'aiWins' : w === 3 ? 'draw' : 'playerWins');
+        tttBubbleTimer = 3;
+        setTimeout(() => { if (tttState === 'result') resetTTT(); }, 3000);
+        return;
+      }
+      if (playerWouldWin === move) {
+        tttBubbleText = getTTTComment('aiBlocks');
+        tttBubbleTimer = 2;
+      } else {
+        tttBubbleText = getTTTComment('aiGoodMove');
+        tttBubbleTimer = 2;
+      }
+    }
+
+    function resetTTT() {
+      tttAnimDir = -1;
+      setTimeout(() => completeTTTReset(), 300);
+    }
+
+    function completeTTTReset() {
+      tttState = 'idle';
+      tttCharId = null;
+      tttCharData = null;
+      tttCharSlotIdx = -1;
+      tttBoard = [0,0,0,0,0,0,0,0,0];
+      tttPlayerTurn = true;
+      tttWinner = 0;
+      tttWinLine = null;
+      tttAiThinking = false;
+      tttAnimProgress = 0;
+      tttAnimDir = 0;
+      tttBubbleText = '';
+      tttBubbleTimer = 0;
+      tttMoveCount = 0;
+      tttLastMove = -1;
+      choiceBtnWork = null;
+      choiceBtnGame = null;
+    }
+
+    function drawTTTChoiceMenu(layout) {
+      if (!tttCharData) return;
+      const pos = getSlotInRoom(0, tttCharSlotIdx, layout);
+      const cx = pos.x + CHAR_SIZE / 2;
+      const cy = pos.y - 10;
+      const scale = 0.7 + 0.3 * tttAnimProgress;
+      const alpha = tttAnimProgress;
+      const btnW = 130, btnH = 28, gap = 6;
+
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.translate(cx, cy);
+      ctx.scale(scale, scale);
+
+      // "Start Working" button
+      const workY = -btnH - gap / 2;
+      ctx.fillStyle = '#6264A7';
+      ctx.beginPath();
+      ctx.roundRect(-btnW / 2, workY, btnW, btnH, 6);
+      ctx.fill();
+      // Monitor icon
+      ctx.fillStyle = '#FFF';
+      ctx.fillRect(-btnW / 2 + 10, workY + 8, 12, 9);
+      ctx.fillRect(-btnW / 2 + 14, workY + 17, 4, 3);
+      ctx.fillRect(-btnW / 2 + 11, workY + 20, 10, 1);
+      // Text
+      ctx.fillStyle = '#FFF';
+      ctx.font = 'bold 11px "Segoe UI", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('Start Working', 8, workY + 18);
+
+      // "Play Tic-Tac-Toe" button
+      const gameY = gap / 2;
+      ctx.fillStyle = '#FFB900';
+      ctx.beginPath();
+      ctx.roundRect(-btnW / 2, gameY, btnW, btnH, 6);
+      ctx.fill();
+      // Grid icon
+      ctx.strokeStyle = '#1E1E2E';
+      ctx.lineWidth = 1.5;
+      const gx = -btnW / 2 + 12, gy = gameY + 7;
+      ctx.beginPath();
+      ctx.moveTo(gx + 5, gy); ctx.lineTo(gx + 5, gy + 14);
+      ctx.moveTo(gx + 10, gy); ctx.lineTo(gx + 10, gy + 14);
+      ctx.moveTo(gx, gy + 5); ctx.lineTo(gx + 15, gy + 5);
+      ctx.moveTo(gx, gy + 10); ctx.lineTo(gx + 15, gy + 10);
+      ctx.stroke();
+      // Text
+      ctx.fillStyle = '#1E1E2E';
+      ctx.font = 'bold 11px "Segoe UI", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('Play Tic-Tac-Toe', 8, gameY + 18);
+
+      ctx.restore();
+
+      // Store hit rects (untransformed coordinates)
+      const invScale = 1 / scale;
+      choiceBtnWork = {
+        x: cx - (btnW / 2) * scale,
+        y: cy + workY * scale,
+        w: btnW * scale,
+        h: btnH * scale,
+      };
+      choiceBtnGame = {
+        x: cx - (btnW / 2) * scale,
+        y: cy + (gap / 2) * scale,
+        w: btnW * scale,
+        h: btnH * scale,
+      };
+    }
+
+    function drawTTTBoard(layout) {
+      const br = getTTTBoardRect(layout);
+      const scale = 0.7 + 0.3 * tttAnimProgress;
+      const alpha = tttAnimProgress;
+      const cx = br.x + br.w / 2;
+      const cy = br.y + br.h / 2;
+
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.translate(cx, cy);
+      ctx.scale(scale, scale);
+      ctx.translate(-br.w / 2, -br.h / 2);
+
+      // Background panel
+      const pad = 14;
+      ctx.fillStyle = 'rgba(30,30,46,0.88)';
+      ctx.shadowColor = 'rgba(0,0,0,0.5)';
+      ctx.shadowBlur = 16;
+      ctx.beginPath();
+      ctx.roundRect(-pad, -pad, br.w + pad * 2, br.h + pad * 2, 10);
+      ctx.fill();
+      ctx.shadowBlur = 0;
+
+      const cellW = br.w / 3;
+      const cellH = br.h / 3;
+
+      // Grid lines
+      ctx.strokeStyle = '#D4A574';
+      ctx.lineWidth = 2;
+      for (let i = 1; i < 3; i++) {
+        ctx.beginPath();
+        ctx.moveTo(i * cellW, 0);
+        ctx.lineTo(i * cellW, br.h);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(0, i * cellH);
+        ctx.lineTo(br.w, i * cellH);
+        ctx.stroke();
+      }
+
+      // Cells
+      for (let i = 0; i < 9; i++) {
+        const col = i % 3;
+        const row = Math.floor(i / 3);
+        const x = col * cellW;
+        const y = row * cellH;
+
+        // Last move highlight
+        if (i === tttLastMove) {
+          ctx.fillStyle = 'rgba(255,185,0,0.12)';
+          ctx.fillRect(x + 1, y + 1, cellW - 2, cellH - 2);
+        }
+
+        const margin = cellW * 0.2;
+        if (tttBoard[i] === 1) {
+          // X (player) - gold
+          ctx.strokeStyle = '#FFB900';
+          ctx.lineWidth = 3;
+          ctx.beginPath();
+          ctx.moveTo(x + margin, y + margin);
+          ctx.lineTo(x + cellW - margin, y + cellH - margin);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.moveTo(x + cellW - margin, y + margin);
+          ctx.lineTo(x + margin, y + cellH - margin);
+          ctx.stroke();
+        } else if (tttBoard[i] === 2) {
+          // O (AI) - purple
+          ctx.strokeStyle = '#7F85F5';
+          ctx.lineWidth = 3;
+          ctx.beginPath();
+          ctx.arc(x + cellW / 2, y + cellH / 2, cellW / 2 - margin, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+      }
+
+      // Winning line
+      if (tttWinLine) {
+        const [a, , c] = tttWinLine;
+        const ax = (a % 3) * cellW + cellW / 2;
+        const ay = Math.floor(a / 3) * cellH + cellH / 2;
+        const cx2 = (c % 3) * cellW + cellW / 2;
+        const cy2 = Math.floor(c / 3) * cellH + cellH / 2;
+        ctx.strokeStyle = tttWinner === 1 ? '#FFB900' : '#7F85F5';
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(ax, ay);
+        ctx.lineTo(cx2, cy2);
+        ctx.stroke();
+      }
+
+      // Turn / result indicator
+      ctx.fillStyle = '#FFF';
+      ctx.font = 'bold 10px "Segoe UI", sans-serif';
+      ctx.textAlign = 'center';
+      let statusText = '';
+      if (tttWinner === 1) statusText = 'You win!';
+      else if (tttWinner === 2) statusText = 'AI wins!';
+      else if (tttWinner === 3) statusText = "It's a draw!";
+      else if (tttAiThinking) statusText = 'AI thinking...';
+      else statusText = 'Your turn (X)';
+      ctx.fillText(statusText, br.w / 2, br.h + pad + 2);
+
+      ctx.restore();
+    }
+
+    function drawTTTBubble(layout) {
+      if (!tttBubbleText || !tttCharData) return;
+      const pos = getSlotInRoom(0, tttCharSlotIdx, layout);
+      const bx = pos.x + CHAR_SIZE / 2;
+      const by = pos.y - 20;
+
+      ctx.font = '10px "Segoe UI", sans-serif';
+      const text = tttBubbleText.length > 45 ? tttBubbleText.slice(0, 45) + '...' : tttBubbleText;
+      const tw = ctx.measureText(text).width;
+      const pad = 8;
+
+      ctx.save();
+      ctx.fillStyle = 'rgba(255,255,255,0.95)';
+      ctx.shadowColor = 'rgba(0,0,0,0.3)';
+      ctx.shadowBlur = 6;
+      ctx.beginPath();
+      ctx.roundRect(bx - tw / 2 - pad, by - 14, tw + pad * 2, 20, 6);
+      ctx.fill();
+      ctx.shadowBlur = 0;
+      // Tail
+      ctx.beginPath();
+      ctx.moveTo(bx - 5, by + 6);
+      ctx.lineTo(bx, by + 13);
+      ctx.lineTo(bx + 5, by + 6);
+      ctx.fill();
+      ctx.restore();
+
+      ctx.fillStyle = '#1E1E2E';
+      ctx.textAlign = 'center';
+      ctx.font = '10px "Segoe UI", sans-serif';
+      ctx.fillText(text, bx, by);
+    }
+
     // ─── Draw unspawned character in Break Room ───
     function drawBreakCharacter(charData, slotIdx, layout) {
       const pos = getSlotInRoom(0, slotIdx, layout);
@@ -1027,8 +1506,13 @@ export class OfficePanel implements vscode.WebviewViewProvider {
       const px = pos.x;
       const py = pos.y;
       const isHovered = hoveredEntity && hoveredEntity.type === 'char' && hoveredEntity.id === charData.id;
+      const isPlaying = tttState !== 'idle' && tttCharId === charData.id;
+      const isDimmed = tttState !== 'idle' && !isPlaying;
 
       charData._px = px; charData._py = py; charData._size = S;
+
+      ctx.save();
+      if (isDimmed) ctx.globalAlpha = 0.3;
 
       // Shadow
       ctx.fillStyle = 'rgba(0,0,0,0.25)';
@@ -1036,7 +1520,16 @@ export class OfficePanel implements vscode.WebviewViewProvider {
       ctx.ellipse(px + S / 2, py + S - 2, S / 2 - 4, 5, 0, 0, Math.PI * 2);
       ctx.fill();
 
-      if (isHovered) {
+      if (isPlaying) {
+        // Selection glow for playing character
+        ctx.save();
+        ctx.shadowColor = '#7F85F5';
+        ctx.shadowBlur = 14;
+        ctx.strokeStyle = 'rgba(127,133,245,0.7)';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(px - 3, py - 3, S + 6, S + 6);
+        ctx.restore();
+      } else if (isHovered && tttState === 'idle') {
         ctx.save();
         ctx.shadowColor = '#FFB900';
         ctx.shadowBlur = 12;
@@ -1049,16 +1542,18 @@ export class OfficePanel implements vscode.WebviewViewProvider {
       const bob = Math.sin(animTimer * 1.5 + slotIdx * 1.2) * 1.5;
       drawCharSprite(charData, px, py, S, bob, false, 0, 0);
 
-      ctx.fillStyle = isHovered ? '#FFF' : '#C8C6C4';
+      ctx.fillStyle = (isHovered && tttState === 'idle') ? '#FFF' : '#C8C6C4';
       ctx.font = '11px "Segoe UI", sans-serif';
       ctx.textAlign = 'center';
       ctx.fillText(charData.name || 'Agent', px + S / 2, py + S + 14);
 
-      if (isHovered) {
+      if (isHovered && tttState === 'idle') {
         ctx.fillStyle = '#FFB900';
         ctx.font = '10px "Segoe UI", sans-serif';
         ctx.fillText('Click to start', px + S / 2, py + S + 26);
       }
+
+      ctx.restore();
     }
 
     // ─── Draw spawned agent ───
@@ -1261,9 +1756,6 @@ export class OfficePanel implements vscode.WebviewViewProvider {
         drawRoom(room, layout.rw, layout.rh);
       }
 
-      // Nameplates
-      drawNameplates(layout);
-
       // Unspawned characters in Break Room
       const available = getAvailableChars();
       for (let i = 0; i < available.length; i++) {
@@ -1273,6 +1765,21 @@ export class OfficePanel implements vscode.WebviewViewProvider {
       // Spawned agents
       for (const [id, agent] of Object.entries(activeAgents)) {
         drawAgent(id, agent);
+      }
+
+      // TTT overlays
+      if (tttState === 'choice') drawTTTChoiceMenu(layout);
+      if (tttState === 'playing' || tttState === 'result') drawTTTBoard(layout);
+      if (tttBubbleText && tttState !== 'idle') drawTTTBubble(layout);
+
+      // TTT animation updates
+      if (tttAnimDir !== 0) {
+        tttAnimProgress += tttAnimDir * dt * 4; // ~0.25s transition
+        tttAnimProgress = Math.max(0, Math.min(1, tttAnimProgress));
+      }
+      if (tttBubbleTimer > 0) {
+        tttBubbleTimer -= dt;
+        if (tttBubbleTimer <= 0) { tttBubbleText = ''; tttBubbleTimer = 0; }
       }
 
       // Empty state
@@ -1295,6 +1802,36 @@ export class OfficePanel implements vscode.WebviewViewProvider {
 
       hoveredEntity = null;
 
+      // TTT choice buttons hover
+      if (tttState === 'choice') {
+        if ((choiceBtnWork && hitTest(mx, my, choiceBtnWork)) ||
+            (choiceBtnGame && hitTest(mx, my, choiceBtnGame))) {
+          canvas.style.cursor = 'pointer';
+          return;
+        }
+      }
+
+      // TTT board cell hover
+      if (tttState === 'playing' && tttPlayerTurn && !tttAiThinking && !tttWinner) {
+        const layout = getRoomLayout();
+        const br = getTTTBoardRect(layout);
+        const scale = 0.7 + 0.3 * tttAnimProgress;
+        const cx = br.x + br.w / 2;
+        const cy = br.y + br.h / 2;
+        const lx = (mx - cx) / scale + br.w / 2;
+        const ly = (my - cy) / scale + br.h / 2;
+        if (lx >= 0 && lx <= br.w && ly >= 0 && ly <= br.h) {
+          const col = Math.floor(lx / (br.w / 3));
+          const row = Math.floor(ly / (br.h / 3));
+          const idx = row * 3 + col;
+          if (idx >= 0 && idx < 9 && tttBoard[idx] === 0) {
+            canvas.style.cursor = 'pointer';
+            return;
+          }
+        }
+      }
+
+      // Normal character hover (only in idle state)
       const available = getAvailableChars();
       for (const c of available) {
         const s = c._size || CHAR_SIZE;
@@ -1302,7 +1839,9 @@ export class OfficePanel implements vscode.WebviewViewProvider {
             mx >= c._px && mx <= c._px + s &&
             my >= c._py && my <= c._py + s) {
           hoveredEntity = { type: 'char', id: c.id };
-          canvas.style.cursor = 'pointer';
+          if (tttState === 'idle') {
+            canvas.style.cursor = 'pointer';
+          }
           return;
         }
       }
@@ -1321,12 +1860,51 @@ export class OfficePanel implements vscode.WebviewViewProvider {
       canvas.style.cursor = 'default';
     });
 
-    canvas.addEventListener('click', () => {
-      if (!hoveredEntity) return;
-      if (hoveredEntity.type === 'char') {
-        vscode.postMessage({ type: 'spawn-agent', characterId: hoveredEntity.id });
-      } else if (hoveredEntity.type === 'agent') {
+    canvas.addEventListener('click', (e) => {
+      const rect = canvas.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+
+      // Agent clicks always pass through
+      if (hoveredEntity && hoveredEntity.type === 'agent') {
         vscode.postMessage({ type: 'click-agent', agentId: hoveredEntity.id });
+        return;
+      }
+
+      if (tttState === 'idle') {
+        if (hoveredEntity && hoveredEntity.type === 'char') {
+          showTTTChoice(hoveredEntity.id);
+        }
+      } else if (tttState === 'choice') {
+        if (choiceBtnWork && hitTest(mx, my, choiceBtnWork)) {
+          vscode.postMessage({ type: 'spawn-agent', characterId: tttCharId });
+          completeTTTReset();
+        } else if (choiceBtnGame && hitTest(mx, my, choiceBtnGame)) {
+          startTTTGame();
+        } else {
+          completeTTTReset();
+        }
+      } else if (tttState === 'playing') {
+        const layout = getRoomLayout();
+        const br = getTTTBoardRect(layout);
+        const scale = 0.7 + 0.3 * tttAnimProgress;
+        const cx = br.x + br.w / 2;
+        const cy = br.y + br.h / 2;
+        // Transform mouse into board-local coords
+        const lx = (mx - cx) / scale + br.w / 2;
+        const ly = (my - cy) / scale + br.h / 2;
+        if (lx >= 0 && lx <= br.w && ly >= 0 && ly <= br.h) {
+          const col = Math.floor(lx / (br.w / 3));
+          const row = Math.floor(ly / (br.h / 3));
+          const idx = row * 3 + col;
+          if (idx >= 0 && idx < 9) {
+            makePlayerMove(idx);
+          }
+        } else {
+          resetTTT();
+        }
+      } else if (tttState === 'result') {
+        resetTTT();
       }
     });
 
